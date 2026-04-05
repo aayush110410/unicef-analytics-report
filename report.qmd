@@ -1,0 +1,562 @@
+---
+title: "Bearing the Burden — Refugees, Wealth & Sanitation"
+subtitle: "The poorest nations host the most refugees. Their people pay the price."
+author: "Anshika Garg"
+date: today
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    number-sections: true
+    fig-width: 11
+    fig-height: 6
+    fig-dpi: 150
+    smooth-scroll: true
+    highlight-style: github
+    mainfont: "Helvetica Neue, Arial, sans-serif"
+    linkcolor: "#b35806"
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+Hosting refugees places enormous pressure on infrastructure that low-income nations are least equipped to maintain. This report connects two UNICEF indicators across **180 countries** and **24 years** — *refugee burden per unit of national wealth*, and *population access to safe on-site sanitation*. The map reflects 2022 data while Charts 02–04 draw on the full dataset to reveal historical patterns.
+
+Together they expose a **compounding vulnerability** that undermines both **SDG 6** (Clean Water & Sanitation) and **SDG 10** (Reduced Inequalities) — the nations hosting the most refugees are precisely those where basic sanitation is already failing.
+
+::: {.callout-note}
+**Data sources:** `unicef_indicator_1.csv` (on-site sanitation coverage, 154 countries, 2000–2024), `unicef_indicator_2.csv` (refugees hosted per $1 GNI per capita, 180 countries, 2001–2024), and `unicef_metadata.csv` (World Bank economic and demographic indicators, 211 countries, 1960–2024).
+:::
+
+---
+
+## Setup & Data Loading
+
+```{python}
+#| label: setup
+#| code-fold: false
+#| echo: true
+#| warning: false
+#| message: false
+
+import polars as pl
+import pandas as pd
+import geopandas as gpd
+from plotnine import *
+
+# ── Custom helper function for consistent plot styling ───────────────────────
+def unicef_theme(title_size=13, fig_w=11, fig_h=6):
+    """
+    Returns a reusable plotnine theme matching the UNICEF dashboard palette.
+    Ensures consistency across all four visualisations.
+    """
+    return (
+        theme_minimal()
+        + theme(
+            figure_size=(fig_w, fig_h),
+            plot_title=element_text(
+                size=title_size, weight="bold", color="#b35806"
+            ),
+            plot_subtitle=element_text(size=10, color="#666666"),
+            plot_caption=element_text(size=8, color="#999999"),
+            panel_grid_minor=element_blank(),
+        )
+    )
+
+# ── Load the three datasets with error handling ──────────────────────────────
+try:
+    ind1 = pl.read_csv("unicef_indicator_1 (1).csv")
+    ind2 = pl.read_csv("unicef_indicator_2 (1).csv")
+    meta = pl.read_csv("unicef_metadata (1).csv")
+    print("✅ All three datasets loaded successfully.")
+except FileNotFoundError as e:
+    raise SystemExit(f"❌ Data file missing: {e.filename}")
+
+print(f"   Indicator 1 (Sanitation): {ind1.shape[0]:,} rows × {ind1.shape[1]} cols, {ind1['country'].n_unique()} countries")
+print(f"   Indicator 2 (Refugees):   {ind2.shape[0]:,} rows × {ind2.shape[1]} cols, {ind2['country'].n_unique()} countries")
+print(f"   Metadata:                 {meta.shape[0]:,} rows × {meta.shape[1]} cols, {meta['country'].n_unique()} countries")
+```
+
+---
+
+## Data Exploration & Transformation
+
+Before building any visualisation, it is essential to explore the datasets — checking for null values, understanding distributions, and preparing join keys. The transformations below clean, filter, rename, and reshape the data using **Polars** expressions.
+
+### Exploratory Data Analysis
+
+```{python}
+#| label: eda-quality
+#| echo: true
+#| warning: false
+
+# ── Data quality check: null counts per key column ───────────────────────────
+def null_report(df, name, cols):
+    """Prints null counts for specified columns in a Polars DataFrame."""
+    print(f"\n── {name} ──")
+    for c in cols:
+        n_null = df[c].null_count()
+        pct = n_null / df.shape[0] * 100
+        print(f"   {c:30s}  nulls: {n_null:>5,}  ({pct:.1f}%)")
+
+null_report(ind1, "Indicator 1 – Sanitation", ["country", "alpha_3_code", "time_period", "obs_value"])
+null_report(ind2, "Indicator 2 – Refugees", ["country", "alpha_3_code", "time_period", "obs_value"])
+null_report(meta, "Metadata", ["country", "year", "GDP per capita (constant 2015 US$)", "Life expectancy at birth, total (years)"])
+
+# ── Descriptive statistics for the two indicators ────────────────────────────
+print("\n── Indicator 1: Sanitation Coverage (%) ──")
+print(f"   Min:    {ind1['obs_value'].min()}")
+print(f"   Median: {ind1['obs_value'].median()}")
+print(f"   Mean:   {ind1['obs_value'].mean():.2f}")
+print(f"   Max:    {ind1['obs_value'].max()}")
+print(f"   Std:    {ind1['obs_value'].std():.2f}")
+
+print("\n── Indicator 2: Refugee Burden (per $1 GNI) ──")
+print(f"   Min:    {ind2['obs_value'].min()}")
+print(f"   Median: {ind2['obs_value'].median()}")
+print(f"   Mean:   {ind2['obs_value'].mean():.2f}")
+print(f"   Max:    {ind2['obs_value'].max()}")
+print(f"   Std:    {ind2['obs_value'].std():.2f}")
+
+# ── Year coverage ────────────────────────────────────────────────────────────
+print(f"\n── Year Coverage ──")
+print(f"   Indicator 1: {ind1['time_period'].min()} – {ind1['time_period'].max()} ({ind1['time_period'].n_unique()} unique years)")
+print(f"   Indicator 2: {ind2['time_period'].min()} – {ind2['time_period'].max()} ({ind2['time_period'].n_unique()} unique years)")
+```
+
+::: {.callout-tip}
+**Key observations from EDA:** The refugee burden indicator has extreme right-skew — the **median is far below the mean**, confirming that a handful of countries carry a disproportionate share. Sanitation data has fewer countries (154 vs. 180) but denser year coverage. Null values in the metadata's GDP column (~30%) require careful handling during joins; a **left join** is chosen to preserve all indicator rows.
+:::
+
+### Cleaning & Transformation
+
+```{python}
+#| label: data-transform
+#| echo: true
+#| warning: false
+
+# ── Indicator 1: Sanitation ──────────────────────────────────────────────────
+# Filter nulls, select relevant columns, rename for clarity, cast year to Int32
+sanitation = (
+    ind1
+    .filter(pl.col("obs_value").is_not_null())
+    .select(["country", "alpha_3_code", "time_period", "obs_value", "indicator"])
+    .rename({"obs_value": "sanitation_pct", "time_period": "year"})
+    .with_columns(pl.col("year").cast(pl.Int32))
+)
+
+# Compute decade column for temporal grouping (used in narrative)
+sanitation = sanitation.with_columns(
+    (pl.col("year") // 10 * 10).alias("decade")
+)
+
+# ── Indicator 2: Refugees per $1 GNI per capita ─────────────────────────────
+# Same pipeline: filter, select, rename, cast
+refugees = (
+    ind2
+    .filter(pl.col("obs_value").is_not_null())
+    .select(["country", "alpha_3_code", "time_period", "obs_value", "indicator"])
+    .rename({"obs_value": "refugee_burden", "time_period": "year"})
+    .with_columns(pl.col("year").cast(pl.Int32))
+)
+
+# ── Key summary statistics ───────────────────────────────────────────────────
+years_of_data = refugees["year"].max() - refugees["year"].min() + 1
+peak_burden   = refugees["refugee_burden"].max()
+peak_country  = refugees.filter(pl.col("refugee_burden") == peak_burden)["country"][0]
+peak_year     = refugees.filter(pl.col("refugee_burden") == peak_burden)["year"][0]
+avg_sanitation_val = sanitation["sanitation_pct"].mean()
+countries_ref = refugees["country"].n_unique()
+
+print(f"━━━━━━━━━━━━━━━ KEY METRICS ━━━━━━━━━━━━━━━")
+print(f"  Years of Data:                  {years_of_data}")
+print(f"  Peak Burden:                    {peak_burden:,} ({peak_country}, {peak_year})")
+print(f"  Avg. Sanitation Access:         {avg_sanitation_val:.1f}% (≈ 1 in 6)")
+print(f"  Countries in Refugee Dataset:   {countries_ref}")
+print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+```
+
+### Metadata: Economic & Demographic Context
+
+```{python}
+#| label: eda-metadata
+#| echo: true
+#| warning: false
+
+metadata = (
+    meta
+    .rename({
+        "GDP per capita (constant 2015 US$)": "gdp_per_capita",
+        "Life expectancy at birth, total (years)": "life_expectancy",
+        "Population, total": "population",
+        "GNI (current US$)": "gni"
+    })
+    .select(["country", "alpha_3_code", "year", "gdp_per_capita",
+             "life_expectancy", "population", "gni"])
+    .with_columns(pl.col("year").cast(pl.Int32))
+)
+
+# Compute income group using with_columns and when/then/otherwise
+metadata = metadata.with_columns(
+    pl.when(pl.col("gdp_per_capita") < 1000).then(pl.lit("Low (< $1k)"))
+    .when(pl.col("gdp_per_capita") < 5000).then(pl.lit("Lower-Mid ($1k–$5k)"))
+    .when(pl.col("gdp_per_capita") < 15000).then(pl.lit("Upper-Mid ($5k–$15k)"))
+    .when(pl.col("gdp_per_capita") < 40000).then(pl.lit("High ($15k–$40k)"))
+    .otherwise(pl.lit("Very High (> $40k)"))
+    .alias("income_group")
+)
+
+# Show income group distribution (latest year with data)
+income_dist = (
+    metadata
+    .filter(pl.col("year") == metadata["year"].max())
+    .drop_nulls("gdp_per_capita")
+    .group_by("income_group")
+    .agg(pl.col("country").n_unique().alias("n_countries"))
+    .sort("n_countries", descending=True)
+)
+print("Income Group Distribution (latest year):")
+print(income_dist)
+```
+
+### Joining Datasets
+
+```{python}
+#| label: join-data
+#| echo: true
+#| warning: false
+
+# ── Join 1: Sanitation + Metadata (left join on alpha_3_code & year) ─────────
+# Left join preserves all sanitation rows; metadata may have nulls where no match.
+merged = sanitation.join(
+    metadata,
+    on=["alpha_3_code", "year"],
+    how="left",
+    suffix="_meta"
+)
+
+# Computed column: population in millions (more readable for labels)
+merged = merged.with_columns(
+    (pl.col("population") / 1_000_000).round(1).alias("pop_millions")
+)
+
+# ── Join 2: Refugees ↔ Sanitation (country-level averages, inner join) ───────
+# Inner join ensures we only keep countries present in BOTH datasets.
+# This is required because Chart 04 plots burden vs. sanitation for each country.
+refugee_sanitation = (
+    refugees
+    .group_by(["country", "alpha_3_code"])
+    .agg(pl.col("refugee_burden").mean().alias("avg_burden"))
+    .join(
+        sanitation
+        .group_by(["country", "alpha_3_code"])
+        .agg(pl.col("sanitation_pct").mean().alias("avg_sanitation")),
+        on="alpha_3_code",
+        how="inner",
+        suffix="_san"
+    )
+    .drop_nulls()
+)
+
+# ── Compute the Burden-Sanitation Index for the most extreme country ─────────
+refugee_sanitation = refugee_sanitation.with_columns(
+    (pl.col("avg_burden") / pl.col("avg_sanitation").clip(lower_bound=0.01))
+    .round(1)
+    .alias("burden_sanitation_index")
+)
+
+max_bsi = refugee_sanitation.sort("burden_sanitation_index", descending=True).head(1)
+bsi_country = max_bsi["country"][0]
+bsi_value   = max_bsi["burden_sanitation_index"][0]
+
+print(f"Merged dataset:           {merged.shape[0]:,} rows × {merged.shape[1]} columns")
+print(f"Refugee–Sanitation pairs: {refugee_sanitation.shape[0]} countries")
+print(f"Max Burden-Sanitation Index: {bsi_value} ({bsi_country})")
+```
+
+::: {.callout-tip}
+**Join strategy:** Both indicator files and the metadata share `alpha_3_code` (ISO-3) and `year`, making them natural join keys. A **left join** preserves all sanitation observations while enriching with economic context. An **inner join** is used for Chart 04 because both axes need non-null values. The Burden-Sanitation Index (**BSI = burden ÷ sanitation**) quantifies how many refugees a country hosts per $1 GNI *for every percentage point of sanitation coverage* — a single metric of compounding vulnerability.
+:::
+
+---
+
+## 01. Refugee Burden by Country (2022) {#sec-world-map}
+
+In 2022, the refugee burden concentrates overwhelmingly in **East Africa** and **South Asia**. The Western world remains pale — geography and wealth determine *responsibility*, not capacity. The darkest reds appear over nations with some of the lowest GNI per capita in the world.
+
+```{python}
+#| label: fig-world-map
+#| fig-cap: "Refugee burden (per $1 GNI per capita) by country, 2022. Grey = no data. Darker reds indicate a larger burden relative to national wealth."
+#| fig-width: 14
+#| fig-height: 7
+#| echo: true
+#| warning: false
+#| message: false
+
+# Filter to 2022 and convert to pandas for geopandas merge
+refugees_2022 = (
+    refugees
+    .filter(pl.col("year") == 2022)
+    .select(["country", "alpha_3_code", "refugee_burden"])
+    .to_pandas()
+)
+
+# Load Natural Earth world geometry shapefile
+world_df = gpd.read_file("ne_110m_countries.zip")
+
+# Merge map geometry with indicator data
+map_data = world_df.merge(
+    refugees_2022,
+    left_on="ISO_A3",
+    right_on="alpha_3_code",
+    how="left"
+)
+
+# Count how many countries have data for the annotation
+n_mapped = refugees_2022.shape[0]
+
+(
+    ggplot(map_data)
+    + geom_map(aes(fill="refugee_burden"), color="white", size=0.15)
+    + scale_fill_gradient(
+        low="#ffffb2",
+        high="#b10026",
+        na_value="#d9d9d9",
+        name="Refugee Burden\n(per $1 GNI)"
+    )
+    + coord_fixed()
+    + theme_void()
+    + theme(
+        figure_size=(14, 7),
+        plot_title=element_text(size=14, weight="bold", ha="center", color="#b35806"),
+        plot_subtitle=element_text(size=10, color="#666666", ha="center"),
+        legend_position="bottom"
+    )
+    + labs(
+        title="01. Refugee Burden by Country (2022)",
+        subtitle=f"Refugees hosted per $1 GNI per capita | {n_mapped} countries mapped | Grey = no data"
+    )
+)
+```
+
+::: {.callout-important}
+**01). Interpretation:** In 2022, the burden concentrates in East Africa and South Asia. The **Western world remains pale** — geography and wealth determine responsibility, not capacity. The darkest reds appear over **Pakistan**, **DR Congo**, **Sudan**, and **Uganda** — countries with some of the lowest GNI per capita in the world. This single snapshot reveals a profound asymmetry: the nations *least* equipped to host refugees are the ones doing so at the highest rate.
+:::
+
+---
+
+## 02. Top 10 Countries by Refugee Burden {#sec-bar-chart}
+
+The bar chart ranks the 10 countries with the highest *average* refugee burden over the entire dataset period (2001–2024). None of the high-income countries appear — every one of them belong to the **Global South**. The dashed reference line marks the global average, demonstrating how far above it the top-burdened nations sit.
+
+```{python}
+#| label: fig-bar-chart
+#| fig-cap: "Top 10 countries by average refugee burden (per $1 GNI per capita), 2001–2024. The dashed line marks the global average. Value labels show the exact mean burden."
+#| fig-width: 10
+#| fig-height: 7
+#| echo: true
+#| warning: false
+#| message: false
+
+# Aggregate average burden by country, sort, take top 10
+top_refugees = (
+    refugees
+    .group_by("country")
+    .agg(pl.col("refugee_burden").mean().alias("avg_burden"))
+    .sort("avg_burden", descending=True)
+    .head(10)
+    .to_pandas()
+)
+
+# Global average for reference line
+global_avg = refugees["refugee_burden"].mean()
+
+(
+    ggplot(top_refugees, aes(x="reorder(country, avg_burden)", y="avg_burden"))
+    + geom_col(aes(fill="avg_burden"), show_legend=False)
+    + scale_fill_gradient(low="#fc8d59", high="#b2182b")
+    + coord_flip()
+    + geom_hline(yintercept=global_avg, linetype="dashed", color="#666666", size=0.8)
+    + annotate("text", x=1, y=global_avg + 30,
+               label=f"Global Average ({global_avg:.0f})",
+               size=8, color="#666666", ha="left")
+    + geom_text(
+        aes(label="avg_burden"),
+        ha="left", size=8, nudge_y=30,
+        format_string="{:.0f}"
+    )
+    + labs(
+        title="02. Top 10 Countries by Refugee Burden",
+        subtitle="Avg. refugees hosted per $1 GNI per capita (2001–2024)",
+        x="",
+        y="Avg. Refugee Burden (per $1 GNI per capita)",
+        caption="Source: UNICEF Indicator 2"
+    )
+    + unicef_theme(fig_w=10, fig_h=7)
+    + theme(panel_grid_major_y=element_blank())
+)
+```
+
+::: {.callout-important}
+**02). Interpretation:** All 10 countries are in the **Global South** — no high-income nation appears. The global average refugee burden is only **67**, but the top country (**Pakistan**) averages **1,506** — nearly **23×** the world mean. This proves the extreme concentration of responsibility into the hands of a few vulnerable countries.
+:::
+
+---
+
+## 03. Refugee Burden Over Time — Most Affected Countries {#sec-timeseries}
+
+The time series tracks the five most-burdened countries from 2001 to 2024. The burden of refugees is **not gradual** — every surge is associated with a phase of regional instability. More importantly, the load has **never returned to its pre-shock level** systematically.
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Refugee burden over time for the 5 most affected countries (2001–2024). Surges correspond to regional crises and the burden rarely returns to pre-shock levels."
+#| fig-width: 12
+#| fig-height: 6
+#| echo: true
+#| warning: false
+#| message: false
+
+# Identify the top 5 by mean burden
+top5 = (
+    refugees
+    .group_by("country")
+    .agg(pl.col("refugee_burden").mean().alias("avg"))
+    .sort("avg", descending=True)
+    .head(5)["country"]
+    .to_list()
+)
+
+# Filter and sort for time series
+ts_data = (
+    refugees
+    .filter(pl.col("country").is_in(top5))
+    .sort(["country", "year"])
+    .to_pandas()
+)
+
+(
+    ggplot(ts_data, aes(x="year", y="refugee_burden",
+                        color="country", group="country"))
+    + geom_line(size=1.2)
+    + geom_point(size=2, alpha=0.7)
+    + scale_color_manual(
+        values=["#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#8c2d04"]
+    )
+    + scale_x_continuous(breaks=range(2000, 2026, 5))
+    + scale_y_continuous(labels=lambda l: [f"{x:,.0f}" for x in l])
+    + annotate("text", x=2002, y=peak_burden * 0.95,
+               label=f"Peak: {peak_burden:,}\n({peak_country}, {peak_year})",
+               size=7, color="#8c2d04", ha="left")
+    + labs(
+        title="03. Refugee Burden Over Time — Most Affected Countries",
+        subtitle="Refugees per $1 GNI per capita (2001–2024)",
+        x="Year",
+        y="Refugee Burden (per $1 GNI per capita)",
+        color="Country",
+        caption="Source: UNICEF Indicator 2"
+    )
+    + unicef_theme(fig_w=12, fig_h=6)
+    + theme(legend_position="right")
+)
+```
+
+::: {.callout-important}
+**03). Interpretation:** The burden of refugees is not gradual. Every surge is associated with the phase of instability in the region — **Pakistan's** peak of **4,149** in **2001** coincides with the post-9/11 Afghan refugee crisis. More importantly, the load of each country has *never returned to its pre-shock level* — the pressure builds up over time, being an additional burden to already limited infrastructure.
+:::
+
+---
+
+## 04. The Sanitation Trap — Burdened Nations Can't Keep Up {#sec-scatter}
+
+The scatterplot places refugee burden on the x-axis (log scale) against sanitation coverage on the y-axis. Two reference lines (drawn at the **average** of each axis) divide countries into four quadrants. The critical zone is **bottom-right**: high refugee burden combined with low sanitation coverage.
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "Refugee burden vs. sanitation coverage with linear regression line. Each dot is one country (all-year average). The bottom-right quadrant is the 'Critical Zone' where the most vulnerable nations are trapped."
+#| fig-width: 11
+#| fig-height: 7
+#| echo: true
+#| warning: false
+#| message: false
+
+# Prepare scatter data
+scatter_df = refugee_sanitation.to_pandas()
+
+# Calculate averages for quadrant reference lines
+avg_burden_val = scatter_df["avg_burden"].mean()
+avg_sanitation_val2 = scatter_df["avg_sanitation"].mean()
+
+# Count countries in the critical zone (bottom-right)
+critical_zone = scatter_df[
+    (scatter_df["avg_burden"] > avg_burden_val) &
+    (scatter_df["avg_sanitation"] < avg_sanitation_val2)
+]
+n_critical = len(critical_zone)
+
+(
+    ggplot(scatter_df, aes(x="avg_burden", y="avg_sanitation"))
+    + geom_point(color="#d95f0e", size=2.5, alpha=0.65)
+    + geom_smooth(method="lm", color="#2c3e50", se=True, linetype="dashed")
+    + geom_hline(yintercept=avg_sanitation_val2, linetype="solid",
+                 color="#999999", size=0.6)
+    + geom_vline(xintercept=avg_burden_val, linetype="solid",
+                 color="#999999", size=0.6)
+    + annotate("text", x=avg_burden_val * 1.3, y=2,
+               label="Average", size=8, color="#666666")
+    + annotate("text", x=0.05, y=avg_sanitation_val2 + 2,
+               label="Average", size=8, color="#666666")
+    + annotate("text",
+               x=max(scatter_df["avg_burden"]) * 0.5, y=5,
+               label=f"Critical Zone\n({n_critical} countries)",
+               size=9, color="#b2182b", alpha=0.6)
+    + annotate("text",
+               x=max(scatter_df["avg_burden"]) * 0.9,
+               y=scatter_df.loc[scatter_df["avg_burden"].idxmax(), "avg_sanitation"] + 3,
+               label=f"BSI: {bsi_value}",
+               size=7, color="#b2182b")
+    + scale_x_log10(labels=lambda l: [f"{x:,.1f}" for x in l])
+    + labs(
+        title="04. The Sanitation Trap — Burdened Nations Can't Keep Up",
+        subtitle=f"Each dot = one country (all-year average) | {n_critical} countries trapped in the Critical Zone",
+        x="Refugee Burden (per $1 GNI per capita, log scale)",
+        y="Population with On-Site Sanitation (%)",
+        caption="Source: UNICEF Indicators 1 & 2"
+    )
+    + unicef_theme(fig_w=11, fig_h=7)
+    + theme(legend_position="right")
+)
+```
+
+::: {.callout-important}
+**04). Interpretation:** The two reference lines divide countries into four quadrants. The critical zone is **bottom-right** — high refugee burden combined with low sanitation coverage. **10 countries** are trapped in this zone. The Burden-Sanitation Index confirms the most extreme cases where refugee burden vastly exceeds sanitation coverage. Countries that have the largest number of refugees *always* average the lowest levels of sanitation coverage — they are effects of the same inequality.
+:::
+
+---
+
+## Conclusion
+
+There is a **structural relationship** between the two indicators, rather than a coincidental one. Countries that have the largest number of refugees, *always average the lowest levels of sanitation coverage* — they are effects of the same inequality.
+
+**Key findings:**
+
+1. **Geography determines burden.** In 2022, burden concentrates in East Africa and South Asia. The Western world remains pale on @fig-world-map — geography and wealth determine responsibility, not capacity.
+2. **The poorest nations host the most refugees.** None of the high-income countries are present in the top 10 ranking (@fig-bar-chart). Pakistan averages nearly **23×** the global mean of 67.
+3. **The burden ratchets up.** @fig-timeseries reveals that once a country experiences a refugee influx, its infrastructure burden rarely returns to pre-shock levels. The all-time peak of **4,149** was recorded in **Pakistan** in **2001**.
+4. **The Sanitation Trap is real.** @fig-scatter confirms that **10 countries** are trapped in the bottom-right "Critical Zone" — high burden, low sanitation.
+
+**SDG 10** requires *less* inequality among countries, but the statistics reveal that the weight is progressively being imbalanced towards the poorest. The target of universal sanitation achieved by **SDG 6** by 2030 is still impossible to achieve by the same countries. The facts are clear: shaping up that in the absence of proportionate support of the global community, both crises will intensify in the already strained regions.
+
+::: {.callout-warning}
+**The burden is real.** The question is — *who will finally share it?*
+:::
+
+---
+
+*Report generated using **Polars** for data transformation, **plotnine** for visualisation, and **Quarto** for document rendering. All data sourced from UNICEF and the World Bank.*

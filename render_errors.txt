@@ -1,0 +1,44 @@
+
+Starting python3 kernel...Done
+
+Executing 'report.quarto_ipynb'
+  Cell 1/9: 'setup'............Done
+  Cell 2/9: 'eda-indicator1'...Done
+  Cell 3/9: 'eda-indicator2'...Done
+  Cell 4/9: 'eda-metadata'.....Done
+  Cell 5/9: 'join-data'........Done
+  Cell 6/9: 'fig-world-map'....Done
+  Cell 7/9: 'fig-bar-chart'....Done
+  Cell 8/9: 'fig-scatter'......Done
+  Cell 9/9: 'fig-timeseries'...Done
+
+[1mpandoc [22m
+  to: html
+  output-file: report.html
+  standalone: true
+  embed-resources: true
+  section-divs: true
+  html-math-method: mathjax
+  wrap: none
+  default-image-extension: png
+  toc: true
+  toc-depth: 3
+  number-sections: true
+  
+[1mmetadata[22m
+  document-css: false
+  link-citations: true
+  date-format: long
+  lang: en
+  title: 'Invisible Burdens: Sanitation, Displacement & the Geography of Inequality'
+  subtitle: A Data-Driven Report for UNICEF — BAA1030 Assignment 2
+  author: Anshika
+  date: today
+  theme: flatly
+  toc-title: Contents
+  smooth-scroll: true
+  mainfont: Helvetica Neue, Arial, sans-serif
+  linkcolor: '#2c3e50'
+  
+Output created: report.html
+
